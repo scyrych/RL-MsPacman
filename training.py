@@ -24,7 +24,16 @@ skip_start = 90
 batch_size = 50
 checkpoint_path = "./pacman_dqn.ckpt"
 
+
 def main():
+    iteration = 0
+    loss_val = np.infty
+    game_length = 0
+    total_max_q = 0
+    mean_max_q = 0.0
+    done = True
+    state = []
+
     dqn = DQN()
     env = gym.make("MsPacman-v0")
 
@@ -43,13 +52,6 @@ def main():
     saver = tf.train.Saver()
 
     with tf.Session() as sess:
-        iteration = 0
-        loss_val = np.infty
-        game_length = 0
-        total_max_q = 0
-        mean_max_q = 0.0
-        done = True
-        state = []
 
         restore_session(copy_online_to_target, init, saver, sess)
 
@@ -62,19 +64,9 @@ def main():
             print("\rIteration {}\tTraining step {}/{} ({:.1f})%\tLoss {:5f}\tMean Max-Q {:5f}   ".format(
                 iteration, step, n_steps, step * 100 / n_steps, loss_val, mean_max_q), end="")
 
-            if done:
-                obs = env.reset()
-                for skip in range(skip_start):
-                    obs, reward, done, info = env.step(0)
-                state = preprocess_observation(obs)
+            state = skip_some_steps(done, env, state)
 
-            q_values = online_q_values.eval(feed_dict={X_state: [state]})
-            action = epsilon_greedy(q_values, step)
-
-            obs, reward, done, info = env.step(action)
-            next_state = preprocess_observation(obs)
-
-            replay_memory.append((state, action, reward, next_state, 1.0 - done))
+            done, q_values, next_state = evaluate_and_play_online_dqn(X_state, env, online_q_values, state, step)
             state = next_state
 
             mean_max_q = compute_statistics(done, game_length, mean_max_q, q_values, total_max_q)
@@ -82,15 +74,8 @@ def main():
             if iteration < training_start or iteration % training_interval != 0:
                 continue
 
-            X_state_val , X_action_val, rewards, X_next_state_val, continues = (sample_memories(batch_size))
-            next_q_values = target_q_values.eval(feed_dict={X_state: X_next_state_val})
-            max_next_q_values = np.max(next_q_values, axis=1, keepdims=True)
-            y_val = rewards + continues * discount_rate * max_next_q_values
+            loss_val = train_online_dqn(X_action, X_state, loss, sess, target_q_values, training_op, y)
 
-            # Train the online DQN
-            _, loss_val = sess.run([training_op, loss], feed_dict={X_state: X_state_val,
-                                                                   X_action: X_action_val,
-                                                                   y: y_val})
             # Copy the online DQN to the target DQN
             if step % copy_steps == 0:
                 copy_online_to_target.run()
@@ -117,6 +102,38 @@ def define_train_variables(online_q_values):
     return X_action, global_step, loss, training_op, y
 
 
+def restore_session(copy_online_to_target, init, saver, sess):
+    if os.path.isfile(checkpoint_path + ".index"):
+        saver.restore(sess, checkpoint_path)
+    else:
+        init.run()
+        copy_online_to_target.run()
+
+
+def skip_some_steps(done, env, state):
+    if done:
+        obs = env.reset()
+        for skip in range(skip_start):
+            obs, reward, done, info = env.step(0)
+        state = preprocess_observation(obs)
+    return state
+
+
+def evaluate_and_play_online_dqn(X_state, env, online_q_values, state, step):
+    # evaluate what to do
+    q_values = online_q_values.eval(feed_dict={X_state: [state]})
+    action = epsilon_greedy(q_values, step)
+
+    # play the game
+    obs, reward, done, info = env.step(action)
+    next_state = preprocess_observation(obs)
+
+    # memorize whats happened
+    replay_memory.append((state, action, reward, next_state, 1.0 - done))
+
+    return done, q_values, next_state
+
+
 def compute_statistics(done, game_length, mean_max_q, q_values, total_max_q):
     total_max_q += q_values.max()
     game_length += 1
@@ -125,12 +142,18 @@ def compute_statistics(done, game_length, mean_max_q, q_values, total_max_q):
     return mean_max_q
 
 
-def restore_session(copy_online_to_target, init, saver, sess):
-    if os.path.isfile(checkpoint_path + ".index"):
-        saver.restore(sess, checkpoint_path)
-    else:
-        init.run()
-        copy_online_to_target.run()
+def train_online_dqn(X_action, X_state, loss, sess, target_q_values, training_op, y):
+    # Sample memories and use the target DQN to produce the target Q-Value
+    X_state_val, X_action_val, rewards, X_next_state_val, continues = (sample_memories(batch_size))
+    next_q_values = target_q_values.eval(feed_dict={X_state: X_next_state_val})
+    max_next_q_values = np.max(next_q_values, axis=1, keepdims=True)
+    y_val = rewards + continues * discount_rate * max_next_q_values
+
+    # Train the online DQN
+    _, loss_val = sess.run([training_op, loss], feed_dict={X_state: X_state_val,
+                                                           X_action: X_action_val,
+                                                           y: y_val})
+    return loss_val
 
 
 if __name__ == '__main__':
