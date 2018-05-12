@@ -25,7 +25,7 @@ batch_size = 50
 checkpoint_path = "./pacman_dqn.ckpt"
 
 
-def main():
+def train_model():
     iteration = 0
     loss_val = np.infty
     game_length = 0
@@ -157,4 +157,4 @@ def train_online_dqn(X_action, X_state, loss, sess, target_q_values, training_op
 
 
 if __name__ == '__main__':
-    main()
+    train_model()
